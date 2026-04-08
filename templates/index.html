@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Weapon Sprite Adapter</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1a1a2e;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh}
+h1{text-align:center;padding:24px 0 6px;font-size:1.8rem;background:linear-gradient(135deg,#7c3aed,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.subtitle{text-align:center;color:#888;font-size:.85rem;margin-bottom:20px}
+
+.app{display:flex;gap:20px;padding:0 20px 20px;max-width:1440px;margin:auto}
+.panel{background:#16213e;border-radius:12px;padding:18px;border:1px solid #263054}
+.panel-title{font-size:1rem;font-weight:600;margin-bottom:12px;color:#a78bfa;display:flex;align-items:center;gap:8px}
+.left-panel{flex:0 0 280px;display:flex;flex-direction:column}
+
+/* Drop zones */
+.drop-zone{border:2px dashed #3a3a5c;border-radius:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;transition:all .2s;position:relative;overflow:hidden;background:#111a33}
+.drop-zone:hover,.drop-zone.drag-over{border-color:#7c3aed;background:#1c1645}
+.drop-zone input{display:none}
+.drop-zone .placeholder{display:flex;flex-direction:column;align-items:center;gap:6px;color:#666;font-size:.8rem;pointer-events:none}
+.drop-zone .placeholder svg{width:32px;height:32px;fill:#555}
+.drop-zone img{width:100%;height:100%;object-fit:contain;position:absolute;inset:0}
+.drop-zone .badge{position:absolute;bottom:6px;right:6px;background:#7c3aed;color:#fff;font-size:.6rem;padding:2px 7px;border-radius:6px;font-weight:600;pointer-events:none;z-index:2}
+.drop-zone .angle-badge{position:absolute;bottom:6px;left:6px;background:#16a34a;color:#fff;font-size:.6rem;padding:2px 7px;border-radius:6px;font-weight:600;pointer-events:none;z-index:2}
+.drop-zone .remove-btn{position:absolute;top:4px;right:4px;background:rgba(220,38,38,.85);color:#fff;border:none;border-radius:50%;width:22px;height:22px;font-size:.75rem;cursor:pointer;display:none;z-index:3;line-height:22px;text-align:center}
+.drop-zone:hover .remove-btn.visible{display:block}
+
+.ref-zone{width:100%;aspect-ratio:1;margin-bottom:10px}
+.layout-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.layout-slot .slot-label{font-size:.7rem;color:#888;font-weight:600}
+.layout-zone{width:100%;aspect-ratio:1}
+
+/* Buttons */
+.actions{display:flex;gap:12px;justify-content:center;padding:16px 20px;flex-wrap:wrap}
+.btn{padding:12px 28px;border:none;border-radius:8px;font-size:.9rem;font-weight:600;cursor:pointer;transition:all .2s}
+.btn-primary{background:linear-gradient(135deg,#7c3aed,#6d28d9);color:#fff}
+.btn-primary:hover{transform:translateY(-1px);box-shadow:0 4px 20px rgba(124,58,237,.4)}
+.btn-primary:disabled{opacity:.4;cursor:not-allowed;transform:none;box-shadow:none}
+.btn-secondary{background:#263054;color:#a78bfa;border:1px solid #3a3a5c}
+.btn-secondary:hover{background:#2d3a66}
+.btn-success{background:linear-gradient(135deg,#16a34a,#15803d);color:#fff}
+.btn-success:hover{box-shadow:0 4px 20px rgba(22,163,74,.4)}
+
+/* Progress */
+.progress-bar{width:100%;height:6px;background:#263054;border-radius:3px;overflow:hidden;display:none}
+.progress-bar .fill{height:100%;background:linear-gradient(90deg,#7c3aed,#a78bfa);transition:width .3s;width:0}
+
+/* Output */
+.output-section{max-width:1440px;margin:0 auto;padding:0 20px 40px}
+.output-section h2{font-size:1.1rem;color:#a78bfa;margin-bottom:14px}
+.output-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.output-card{background:#16213e;border:1px solid #263054;border-radius:10px;overflow:hidden;position:relative}
+.output-card .card-img{width:100%;aspect-ratio:1;background:#111a33;display:flex;align-items:center;justify-content:center;position:relative}
+.output-card .card-img img{max-width:100%;max-height:100%;object-fit:contain}
+.output-card .card-img .checker{position:absolute;inset:0;background:repeating-conic-gradient(#222 0% 25%, #2a2a3e 0% 50%) 50%/16px 16px;z-index:0}
+.output-card .card-img img{position:relative;z-index:1}
+.output-card .card-footer{padding:10px 12px;display:flex;justify-content:space-between;align-items:center}
+.output-card .card-footer span{font-size:.75rem;color:#888}
+.output-card .card-footer .dl-btn{font-size:.7rem;background:#7c3aed;color:#fff;border:none;padding:4px 12px;border-radius:5px;cursor:pointer}
+.output-card .card-footer .dl-btn:hover{background:#6d28d9}
+
+/* Comparison overlay */
+.compare-label{position:absolute;top:6px;left:6px;background:rgba(124,58,237,.8);color:#fff;font-size:.6rem;padding:2px 8px;border-radius:4px;z-index:3}
+
+.toast{position:fixed;bottom:24px;right:24px;background:#7c3aed;color:#fff;padding:10px 20px;border-radius:8px;font-size:.85rem;opacity:0;transition:opacity .3s;pointer-events:none;z-index:100}
+.toast.show{opacity:1}
+
+.spinner{width:32px;height:32px;border:3px solid #263054;border-top-color:#7c3aed;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+@media(max-width:1000px){
+  .app{flex-direction:column}
+  .left-panel{flex:none}
+  .output-grid{grid-template-columns:1fr 1fr}
+}
+@media(max-width:600px){
+  .output-grid{grid-template-columns:1fr}
+  .layout-grid{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+
+<h1>⚔️ Weapon Sprite Adapter</h1>
+<p class="subtitle">Tự động xoay &amp; resize weapon theo hướng + kích thước của layout images</p>
+
+<div class="app">
+  <!-- Left: reference -->
+  <div class="panel left-panel">
+    <div class="panel-title">🗡️ Reference Weapon</div>
+    <div class="drop-zone ref-zone" id="refZone">
+      <input type="file" accept="image/*">
+      <div class="placeholder">
+        <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+        <span>Drop or click<br>to upload weapon</span>
+      </div>
+      <button class="remove-btn" title="Remove">&times;</button>
+    </div>
+    <p style="color:#666;font-size:.7rem;text-align:center">Weapon này sẽ được xoay &amp; resize theo mỗi layout</p>
+  </div>
+
+  <!-- Right: layouts -->
+  <div class="panel" style="flex:1">
+    <div class="panel-title">📐 Layout Images (up to 6)</div>
+    <div class="layout-grid" id="layoutGrid"></div>
+  </div>
+</div>
+
+<div class="actions">
+  <button class="btn btn-primary" id="generateBtn" disabled>⚡ Generate Images</button>
+  <button class="btn btn-success" id="downloadAllBtn" style="display:none">📦 Download All (ZIP)</button>
+</div>
+
+<div style="max-width:600px;margin:0 auto;padding:0 20px">
+  <div class="progress-bar" id="progressBar"><div class="fill" id="progressFill"></div></div>
+</div>
+
+<div class="output-section" id="outputSection" style="display:none">
+  <h2>Generated Results</h2>
+  <div class="output-grid" id="outputGrid"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const SLOTS = 6;
+const state = { refFile: null, refData: null, layouts: new Array(SLOTS).fill(null), layoutFiles: new Array(SLOTS).fill(null) };
+let lastBatchId = null;
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+function updateBtn() {
+  document.getElementById('generateBtn').disabled = !(state.refFile && state.layoutFiles.some(Boolean));
+}
+
+/* --- analyze image via backend --- */
+async function analyzeImage(file) {
+  const fd = new FormData();
+  fd.append('image', file);
+  const res = await fetch('/api/analyze', { method: 'POST', body: fd });
+  return res.json();
+}
+
+/* --- drop zone wiring --- */
+function wireZone(zone, onFile) {
+  const input = zone.querySelector('input');
+  const removeBtn = zone.querySelector('.remove-btn');
+  zone.addEventListener('click', e => { if (e.target !== removeBtn) input.click(); });
+  input.addEventListener('change', () => { if (input.files[0]) onFile(input.files[0]); input.value = ''; });
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault(); zone.classList.remove('drag-over');
+    const f = e.dataTransfer.files[0];
+    if (f && f.type.startsWith('image/')) onFile(f);
+  });
+}
+
+function renderPreview(zone, dataURL, info) {
+  let img = zone.querySelector('img');
+  if (!img) { img = document.createElement('img'); zone.appendChild(img); }
+  img.src = dataURL;
+  // Dimension badge
+  let badge = zone.querySelector('.badge');
+  if (!badge) { badge = document.createElement('span'); badge.className = 'badge'; zone.appendChild(badge); }
+  badge.textContent = info.width + '×' + info.height;
+  // Angle badge
+  let abadge = zone.querySelector('.angle-badge');
+  if (!abadge) { abadge = document.createElement('span'); abadge.className = 'angle-badge'; zone.appendChild(abadge); }
+  abadge.textContent = info.angle + '°';
+  zone.querySelector('.placeholder').style.display = 'none';
+  zone.querySelector('.remove-btn').classList.add('visible');
+}
+
+function clearPreview(zone) {
+  const img = zone.querySelector('img'); if (img) img.remove();
+  const badge = zone.querySelector('.badge'); if (badge) badge.remove();
+  const abadge = zone.querySelector('.angle-badge'); if (abadge) abadge.remove();
+  zone.querySelector('.placeholder').style.display = '';
+  zone.querySelector('.remove-btn').classList.remove('visible');
+}
+
+/* --- Reference --- */
+const refZone = document.getElementById('refZone');
+wireZone(refZone, async file => {
+  state.refFile = file;
+  const info = await analyzeImage(file);
+  state.refData = info;
+  const url = URL.createObjectURL(file);
+  renderPreview(refZone, url, info);
+  updateBtn();
+});
+refZone.querySelector('.remove-btn').addEventListener('click', e => {
+  e.stopPropagation(); state.refFile = null; state.refData = null;
+  clearPreview(refZone); updateBtn();
+});
+
+/* --- Layout slots --- */
+const layoutGrid = document.getElementById('layoutGrid');
+for (let i = 0; i < SLOTS; i++) {
+  const slot = document.createElement('div');
+  slot.className = 'layout-slot';
+  slot.innerHTML = `
+    <span class="slot-label">Slot ${i + 1}</span>
+    <div class="drop-zone layout-zone" data-idx="${i}">
+      <input type="file" accept="image/*">
+      <div class="placeholder">
+        <svg viewBox="0 0 24 24" width="28" height="28"><path fill="#555" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+        <span>Drop / click</span>
+      </div>
+      <button class="remove-btn" title="Remove">&times;</button>
+    </div>`;
+  layoutGrid.appendChild(slot);
+  const zone = slot.querySelector('.drop-zone');
+  wireZone(zone, async file => {
+    state.layoutFiles[i] = file;
+    const info = await analyzeImage(file);
+    state.layouts[i] = info;
+    renderPreview(zone, URL.createObjectURL(file), info);
+    updateBtn();
+  });
+  zone.querySelector('.remove-btn').addEventListener('click', e => {
+    e.stopPropagation();
+    state.layoutFiles[i] = null; state.layouts[i] = null;
+    clearPreview(zone); updateBtn();
+  });
+}
+
+/* --- Generate --- */
+document.getElementById('generateBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('generateBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Processing...';
+
+  const bar = document.getElementById('progressBar');
+  const fill = document.getElementById('progressFill');
+  bar.style.display = 'block';
+  fill.style.width = '20%';
+
+  const fd = new FormData();
+  fd.append('reference', state.refFile);
+  for (let i = 0; i < SLOTS; i++) {
+    if (state.layoutFiles[i]) {
+      fd.append(`layout_${i}`, state.layoutFiles[i]);
+    }
+  }
+
+  fill.style.width = '50%';
+
+  try {
+    const res = await fetch('/api/generate', { method: 'POST', body: fd });
+    const data = await res.json();
+    fill.style.width = '90%';
+
+    if (data.error) {
+      showToast('Error: ' + data.error);
+      return;
+    }
+
+    lastBatchId = data.batch_id;
+    renderResults(data.results);
+    fill.style.width = '100%';
+    setTimeout(() => { bar.style.display = 'none'; fill.style.width = '0'; }, 600);
+
+    document.getElementById('outputSection').style.display = '';
+    document.getElementById('downloadAllBtn').style.display = '';
+    document.getElementById('outputSection').scrollIntoView({ behavior: 'smooth' });
+    showToast('Done! ' + data.results.filter(Boolean).length + ' images generated');
+  } catch (err) {
+    showToast('Error: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⚡ Generate Images';
+    updateBtn();
+  }
+});
+
+function renderResults(results) {
+  const grid = document.getElementById('outputGrid');
+  grid.innerHTML = '';
+  results.forEach((r, i) => {
+    if (!r) return;
+    const card = document.createElement('div');
+    card.className = 'output-card';
+    card.innerHTML = `
+      <div class="card-img">
+        <div class="checker"></div>
+        <span class="compare-label">Slot ${r.slot}</span>
+        <img src="${r.url}" alt="Slot ${r.slot}">
+      </div>
+      <div class="card-footer">
+        <span>${r.width} × ${r.height}</span>
+        <a class="dl-btn" href="${r.url}" download="${r.filename}">⬇ Download</a>
+      </div>`;
+    grid.appendChild(card);
+  });
+}
+
+/* --- Download All --- */
+document.getElementById('downloadAllBtn').addEventListener('click', () => {
+  if (!lastBatchId) return;
+  window.location.href = `/api/download-all/${lastBatchId}`;
+});
+</script>
+</body>
+</html>

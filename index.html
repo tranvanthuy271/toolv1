@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Weapon Sprite Adapter</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#1a1a2e;color:#e0e0e0;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;min-height:100vh}
+  h1{text-align:center;padding:24px 0 8px;font-size:1.8rem;background:linear-gradient(135deg,#7c3aed,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .subtitle{text-align:center;color:#888;font-size:.85rem;margin-bottom:24px}
+  .app{display:flex;gap:24px;padding:0 24px 24px;max-width:1400px;margin:auto}
+  .panel{background:#16213e;border-radius:12px;padding:20px;border:1px solid #263054}
+  .panel-title{font-size:1rem;font-weight:600;margin-bottom:14px;color:#a78bfa;display:flex;align-items:center;gap:8px}
+  .panel-title svg{width:18px;height:18px;fill:#a78bfa}
+  .left-panel{flex:0 0 280px;display:flex;flex-direction:column}
+
+  /* Drop zones */
+  .drop-zone{border:2px dashed #3a3a5c;border-radius:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;transition:all .2s;position:relative;overflow:hidden;background:#111a33}
+  .drop-zone:hover,.drop-zone.drag-over{border-color:#7c3aed;background:#1c1645}
+  .drop-zone input{display:none}
+  .drop-zone .placeholder{display:flex;flex-direction:column;align-items:center;gap:6px;color:#666;font-size:.8rem;pointer-events:none}
+  .drop-zone .placeholder svg{width:32px;height:32px;fill:#555}
+  .drop-zone img{width:100%;height:100%;object-fit:contain;position:absolute;inset:0}
+  .drop-zone .badge{position:absolute;bottom:6px;right:6px;background:#7c3aed;color:#fff;font-size:.65rem;padding:2px 7px;border-radius:6px;font-weight:600;pointer-events:none;z-index:2}
+  .drop-zone .remove-btn{position:absolute;top:4px;right:4px;background:rgba(220,38,38,.85);color:#fff;border:none;border-radius:50%;width:22px;height:22px;font-size:.75rem;cursor:pointer;display:none;z-index:3;line-height:22px;text-align:center}
+  .drop-zone:hover .remove-btn.visible{display:block}
+
+  .ref-zone{width:100%;aspect-ratio:1;margin-bottom:12px}
+
+  /* Layout grid */
+  .layout-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .layout-slot{display:flex;flex-direction:column;gap:4px}
+  .layout-slot .slot-label{font-size:.7rem;color:#888;font-weight:600}
+  .layout-zone{width:100%;aspect-ratio:1}
+
+  /* Buttons */
+  .actions{display:flex;gap:12px;justify-content:center;padding:20px 24px;flex-wrap:wrap}
+  .btn{padding:12px 28px;border:none;border-radius:8px;font-size:.9rem;font-weight:600;cursor:pointer;transition:all .2s}
+  .btn-primary{background:linear-gradient(135deg,#7c3aed,#6d28d9);color:#fff}
+  .btn-primary:hover{transform:translateY(-1px);box-shadow:0 4px 20px rgba(124,58,237,.4)}
+  .btn-primary:disabled{opacity:.4;cursor:not-allowed;transform:none;box-shadow:none}
+  .btn-secondary{background:#263054;color:#a78bfa;border:1px solid #3a3a5c}
+  .btn-secondary:hover{background:#2d3a66}
+
+  /* Output */
+  .output-section{max-width:1400px;margin:0 auto;padding:0 24px 40px}
+  .output-section h2{font-size:1.1rem;color:#a78bfa;margin-bottom:14px}
+  .output-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .output-card{background:#16213e;border:1px solid #263054;border-radius:10px;padding:14px;position:relative}
+  .output-card .card-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .output-card .card-head span{font-size:.8rem;font-weight:600;color:#7c3aed}
+  .output-card .copy-one{font-size:.7rem;background:#263054;color:#a78bfa;border:1px solid #3a3a5c;padding:3px 10px;border-radius:5px;cursor:pointer}
+  .output-card .copy-one:hover{background:#2d3a66}
+  .output-card textarea{width:100%;min-height:180px;background:#111a33;border:1px solid #263054;border-radius:6px;color:#ccc;font-size:.72rem;font-family:'Cascadia Code','Fira Code',monospace;padding:10px;resize:vertical;line-height:1.5}
+  .output-card textarea:focus{outline:none;border-color:#7c3aed}
+
+  .toast{position:fixed;bottom:24px;right:24px;background:#7c3aed;color:#fff;padding:10px 20px;border-radius:8px;font-size:.85rem;opacity:0;transition:opacity .3s;pointer-events:none;z-index:100}
+  .toast.show{opacity:1}
+
+  @media(max-width:900px){
+    .app{flex-direction:column}
+    .left-panel{flex:none}
+    .output-grid{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+
+<h1>⚔️ Weapon Sprite Adapter</h1>
+<p class="subtitle">Generate prompts to redraw a weapon matching each layout's size &amp; direction</p>
+
+<div class="app">
+  <!-- Left: Reference -->
+  <div class="panel left-panel">
+    <div class="panel-title">
+      <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+      Reference Image
+    </div>
+    <div class="drop-zone ref-zone" id="refZone">
+      <input type="file" accept="image/*">
+      <div class="placeholder">
+        <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+        <span>Drop or click<br>to upload weapon</span>
+      </div>
+      <button class="remove-btn" title="Remove">&times;</button>
+    </div>
+    <p style="color:#666;font-size:.7rem;text-align:center">This weapon's style will be redrawn for each layout</p>
+  </div>
+
+  <!-- Right: Layouts -->
+  <div class="panel" style="flex:1">
+    <div class="panel-title">
+      <svg viewBox="0 0 24 24"><path d="M4 8h4V4H4v4zm6 12h4v-4h-4v4zm-6 0h4v-4H4v4zm0-6h4v-4H4v4zm6 0h4v-4h-4v4zM16 4v4h4V4h-4zm-6-0h4V4h-4v4zm6 6h4v-4h-4v4zm0 6h4v-4h-4v4z"/></svg>
+      Layout Images (up to 6)
+    </div>
+    <div class="layout-grid" id="layoutGrid"></div>
+  </div>
+</div>
+
+<div class="actions">
+  <button class="btn btn-primary" id="generateBtn" disabled>🎨 Generate Prompts</button>
+  <button class="btn btn-secondary" id="copyAllBtn" style="display:none">📋 Copy All Prompts</button>
+</div>
+
+<div class="output-section" id="outputSection" style="display:none">
+  <h2>Generated Prompts</h2>
+  <div class="output-grid" id="outputGrid"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const SLOT_COUNT = 6;
+const state = { ref: null, layouts: new Array(SLOT_COUNT).fill(null) };
+
+/* --- helpers --- */
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2000);
+}
+
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => resolve({ dataURL: reader.result, width: img.naturalWidth, height: img.naturalHeight, name: file.name });
+      img.onerror = reject;
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function updateGenerateBtn() {
+  document.getElementById('generateBtn').disabled = !(state.ref && state.layouts.some(Boolean));
+}
+
+/* --- drop zone wiring --- */
+function wireZone(zone, onFile) {
+  const input = zone.querySelector('input');
+  const removeBtn = zone.querySelector('.remove-btn');
+
+  zone.addEventListener('click', e => { if (e.target !== removeBtn) input.click(); });
+  input.addEventListener('change', () => { if (input.files[0]) onFile(input.files[0]); input.value = ''; });
+
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault();
+    zone.classList.remove('drag-over');
+    const f = e.dataTransfer.files[0];
+    if (f && f.type.startsWith('image/')) onFile(f);
+  });
+}
+
+function renderPreview(zone, imgData) {
+  let img = zone.querySelector('img');
+  if (!img) { img = document.createElement('img'); zone.appendChild(img); }
+  img.src = imgData.dataURL;
+  let badge = zone.querySelector('.badge');
+  if (!badge) { badge = document.createElement('span'); badge.className = 'badge'; zone.appendChild(badge); }
+  badge.textContent = imgData.width + '×' + imgData.height;
+  zone.querySelector('.placeholder').style.display = 'none';
+  zone.querySelector('.remove-btn').classList.add('visible');
+}
+
+function clearPreview(zone) {
+  const img = zone.querySelector('img');
+  if (img) img.remove();
+  const badge = zone.querySelector('.badge');
+  if (badge) badge.remove();
+  zone.querySelector('.placeholder').style.display = '';
+  zone.querySelector('.remove-btn').classList.remove('visible');
+}
+
+/* --- Reference zone --- */
+const refZone = document.getElementById('refZone');
+wireZone(refZone, async file => {
+  const data = await loadImage(file);
+  state.ref = data;
+  renderPreview(refZone, data);
+  updateGenerateBtn();
+});
+refZone.querySelector('.remove-btn').addEventListener('click', e => {
+  e.stopPropagation();
+  state.ref = null;
+  clearPreview(refZone);
+  updateGenerateBtn();
+});
+
+/* --- Layout zones --- */
+const layoutGrid = document.getElementById('layoutGrid');
+for (let i = 0; i < SLOT_COUNT; i++) {
+  const slot = document.createElement('div');
+  slot.className = 'layout-slot';
+  slot.innerHTML = `
+    <span class="slot-label">Slot ${i + 1}</span>
+    <div class="drop-zone layout-zone" data-idx="${i}">
+      <input type="file" accept="image/*">
+      <div class="placeholder">
+        <svg viewBox="0 0 24 24" width="28" height="28"><path fill="#555" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+        <span>Drop / click</span>
+      </div>
+      <button class="remove-btn" title="Remove">&times;</button>
+    </div>`;
+  layoutGrid.appendChild(slot);
+  const zone = slot.querySelector('.drop-zone');
+  wireZone(zone, async file => {
+    const data = await loadImage(file);
+    state.layouts[i] = data;
+    renderPreview(zone, data);
+    updateGenerateBtn();
+  });
+  zone.querySelector('.remove-btn').addEventListener('click', e => {
+    e.stopPropagation();
+    state.layouts[i] = null;
+    clearPreview(zone);
+    updateGenerateBtn();
+  });
+}
+
+/* --- Prompt generation --- */
+function buildPrompt(slotIndex, layoutData, refData) {
+  return `[PROMPT FOR SLOT ${slotIndex + 1}]
+
+You are a game asset artist. I will give you two images:
+- Image A: The reference weapon (style, shape, design to copy)
+- Image B: A layout image (defines the canvas size and the weapon's direction/angle)
+
+Reference weapon: "${refData.name}" (${refData.width}×${refData.height})
+Layout image: "${layoutData.name}" (${layoutData.width}×${layoutData.height})
+
+Task:
+1. Analyze Image B to detect:
+   - Canvas dimensions: ${layoutData.width} × ${layoutData.height} pixels
+   - The weapon's orientation/angle (e.g. pointing top-left at 45°, horizontal, vertical, etc.)
+   - The weapon's position within the canvas (centered, offset, etc.)
+
+2. Redraw the weapon from Image A so that:
+   - The output image is exactly ${layoutData.width} × ${layoutData.height} pixels
+   - The weapon faces the same direction/angle as the weapon in Image B
+   - The weapon occupies a similar proportion of the canvas as in Image B
+   - Style, color, details are preserved from Image A
+   - Background is fully transparent (PNG)
+   - Clean 2D game asset style, sharp edges, high detail
+
+Output: A single ${layoutData.width}×${layoutData.height} PNG image with transparent background.`;
+}
+
+document.getElementById('generateBtn').addEventListener('click', () => {
+  const outputGrid = document.getElementById('outputGrid');
+  outputGrid.innerHTML = '';
+  const prompts = [];
+
+  state.layouts.forEach((layout, i) => {
+    if (!layout) return;
+    const prompt = buildPrompt(i, layout, state.ref);
+    prompts.push(prompt);
+
+    const card = document.createElement('div');
+    card.className = 'output-card';
+    card.innerHTML = `
+      <div class="card-head">
+        <span>Slot ${i + 1} — ${layout.width}×${layout.height}</span>
+        <button class="copy-one">Copy</button>
+      </div>
+      <textarea readonly>${prompt}</textarea>`;
+    card.querySelector('.copy-one').addEventListener('click', () => {
+      navigator.clipboard.writeText(prompt).then(() => showToast('Copied slot ' + (i + 1) + ' prompt!'));
+    });
+    outputGrid.appendChild(card);
+  });
+
+  document.getElementById('outputSection').style.display = '';
+  document.getElementById('copyAllBtn').style.display = '';
+  document.getElementById('copyAllBtn').onclick = () => {
+    navigator.clipboard.writeText(prompts.join('\n\n---\n\n')).then(() => showToast('All prompts copied!'));
+  };
+  document.getElementById('outputSection').scrollIntoView({ behavior: 'smooth' });
+});
+</script>
+</body>
+</html>
