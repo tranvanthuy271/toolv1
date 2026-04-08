@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import binascii
 import io
 import os
+import queue
+import secrets
+import struct
+import threading
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -35,6 +41,31 @@ except Exception:
     DND_FILES = None
     BaseWindow = tk.Tk
     HAS_DND = False
+
+try:
+    from Crypto.Cipher import AES as _AES_LIB
+except ImportError:
+    try:
+        from Cryptodome.Cipher import AES as _AES_LIB
+    except ImportError:
+        _AES_LIB = None
+
+_AES_PA = [79, 46, 15, 52,  8, 49, 12, 49, 29, 49, 22, 56, 30, 63, 52, 40]
+_AES_MA = [14, 21,  5, 12,  3,  9,  6, 10, 18, 11,  7,  8,  4,  6, 13, 17]
+
+
+def _build_aes_key() -> bytes:
+    ch = [pa ^ ma for pa, ma in zip(_AES_PA, _AES_MA)]
+    key = bytearray(16)
+    key[0] = ch[0]
+    for i in range(1, 16):
+        key[i] = ch[i] ^ ch[i - 1]
+    return bytes(key)
+
+
+_AES_KEY = _build_aes_key()
+_AES_MAGIC = b'\xCA\xFE'
+_AES_HDR_SIZE = 22  # 2 + 4 + 16
 
 APP_TITLE = "Weapon Sprite Adapter"
 WINDOW_BG = "#1a1a2e"
@@ -430,6 +461,13 @@ class WeaponSpriteAdapterApp(BaseWindow):
         self.last_bg_batch_dir: Path | None = None
         self.last_client_scale_dir: Path | None = None
         self.last_encrypt_dir: Path | None = None
+        self.encrypt_out_dir_var = tk.StringVar(value="")
+        self._enc_out_dir_entry: tk.Entry | None = None
+        self._enc_out_dir_browse_btn: tk.Button | None = None
+        self._encrypt_log_queue: queue.Queue = queue.Queue()
+        self._encrypt_busy = False
+        self._enc_mode_snap: str = "auto"
+        self._encrypt_action_btns: list[tk.Button] = []
         self.active_tab = "adapter"
         self.tab_buttons: dict[str, tk.Button] = {}
         self._arr_data = None
@@ -1323,6 +1361,32 @@ class WeaponSpriteAdapterApp(BaseWindow):
             data[i] = tmp[i]
         return data
 
+    @staticmethod
+    def _aes_encrypt_bytes(plaintext: bytes) -> bytes:
+        if _AES_LIB is None:
+            raise RuntimeError("pycryptodome not installed. Run: pip install pycryptodome")
+        nonce = secrets.token_bytes(16)
+        cipher = _AES_LIB.new(_AES_KEY, _AES_LIB.MODE_CTR, nonce=b'', initial_value=nonce)
+        ct = cipher.encrypt(plaintext)
+        crc = binascii.crc32(ct) & 0xFFFFFFFF
+        header = _AES_MAGIC + struct.pack('>I', crc) + nonce
+        return header + ct
+
+    @staticmethod
+    def _aes_decrypt_bytes(data: bytes) -> bytes:
+        if _AES_LIB is None:
+            raise RuntimeError("pycryptodome not installed. Run: pip install pycryptodome")
+        if len(data) < _AES_HDR_SIZE or data[0:2] != _AES_MAGIC:
+            raise ValueError("Not a v1 AES-encrypted asset")
+        stored_crc = struct.unpack('>I', data[2:6])[0]
+        nonce = data[6:22]
+        ct = data[_AES_HDR_SIZE:]
+        crc = binascii.crc32(ct) & 0xFFFFFFFF
+        if crc != stored_crc:
+            raise ValueError(f"CRC32 mismatch: stored={stored_crc:#010x} computed={crc:#010x}")
+        cipher = _AES_LIB.new(_AES_KEY, _AES_LIB.MODE_CTR, nonce=b'', initial_value=nonce)
+        return cipher.decrypt(ct)
+
     @classmethod
     def _is_normal_png(cls, data: bytes | bytearray) -> bool:
         """Return True if data starts with the standard PNG header."""
@@ -1332,7 +1396,7 @@ class WeaponSpriteAdapterApp(BaseWindow):
         content = tk.Frame(self.encrypt_frame, bg=WINDOW_BG)
         content.grid(row=0, column=0, sticky="nsew")
         content.grid_columnconfigure(0, weight=1)
-        content.grid_rowconfigure(3, weight=1)
+        content.grid_rowconfigure(5, weight=1)
 
         header = tk.Frame(content, bg=WINDOW_BG)
         header.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 10))
@@ -1348,9 +1412,9 @@ class WeaponSpriteAdapterApp(BaseWindow):
         tk.Label(
             header,
             text=(
-                "Đảo ngược 51 byte đầu tiên của file PNG (thuật toán đối xứng).\n"
-                "Encrypt: PNG thường → mã hóa  |  Decrypt: mã hóa → PNG thường.\n"
-                "Auto-detect sẽ kiểm tra header PNG để chọn đúng hướng. Encrypt se giu duoi .png cho file dau ra."
+                "Chọn thuật toán mã hóa bên dưới:\n"
+                "• Đảo 51 byte: đảo ngược 51 byte đầu PNG (đối xứng).  |  • AES-128-CTR: mã hóa AES chuẩn.\n"
+                "Auto-detect tự nhận biết file cần encrypt hay decrypt."
             ),
             bg=WINDOW_BG,
             fg=MUTED,
@@ -1358,9 +1422,39 @@ class WeaponSpriteAdapterApp(BaseWindow):
             justify="left",
         ).pack(anchor="w", pady=(4, 0))
 
+        # Algorithm selector
+        algo_frame = tk.Frame(content, bg=WINDOW_BG)
+        algo_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 6))
+
+        tk.Label(
+            algo_frame,
+            text="Thuật toán:",
+            bg=WINDOW_BG,
+            fg=TEXT,
+            font=("Segoe UI", 10),
+        ).pack(side="left", padx=(0, 12))
+
+        self.encrypt_algo = tk.StringVar(value="swap51")
+        for value, label in (
+            ("swap51", "Đảo 51 byte (PNG)"),
+            ("aes", "AES-128-CTR"),
+        ):
+            tk.Radiobutton(
+                algo_frame,
+                text=label,
+                variable=self.encrypt_algo,
+                value=value,
+                bg=WINDOW_BG,
+                fg=TEXT,
+                activebackground=WINDOW_BG,
+                activeforeground=TEXT,
+                selectcolor=CARD_BG,
+                font=("Segoe UI", 10),
+            ).pack(side="left", padx=(0, 16))
+
         # Mode selector
         mode_frame = tk.Frame(content, bg=WINDOW_BG)
-        mode_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 10))
+        mode_frame.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 10))
 
         self.encrypt_mode = tk.StringVar(value="auto")
         for value, label in (
@@ -1394,8 +1488,77 @@ class WeaponSpriteAdapterApp(BaseWindow):
             font=("Segoe UI", 10),
         ).pack(side="left", padx=(0, 16))
 
+        self.encrypt_overwrite.trace_add("write", lambda *_: self._encrypt_toggle_out_dir())
+
+        # Output directory selector
+        out_dir_frame = tk.Frame(content, bg=WINDOW_BG)
+        out_dir_frame.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 8))
+
+        row1 = tk.Frame(out_dir_frame, bg=WINDOW_BG)
+        row1.pack(fill="x")
+
+        tk.Label(
+            row1,
+            text="Output folder:",
+            bg=WINDOW_BG,
+            fg=TEXT,
+            font=("Segoe UI", 10),
+        ).pack(side="left", padx=(0, 8))
+
+        self._enc_out_dir_entry = tk.Entry(
+            row1,
+            textvariable=self.encrypt_out_dir_var,
+            bg=CARD_BG,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            font=("Segoe UI", 9),
+            state="readonly",
+            readonlybackground=CARD_BG,
+        )
+        self._enc_out_dir_entry.pack(side="left", fill="x", expand=True, ipady=4)
+
+        self._enc_out_dir_browse_btn = tk.Button(
+            row1,
+            text="Browse…",
+            command=self._encrypt_browse_output,
+            bg=ACCENT,
+            fg="white",
+            activebackground=ACCENT_ALT,
+            activeforeground="white",
+            relief="flat",
+            padx=10,
+            pady=4,
+            cursor="hand2",
+            font=("Segoe UI", 9),
+        )
+        self._enc_out_dir_browse_btn.pack(side="left", padx=(6, 0))
+
+        tk.Button(
+            row1,
+            text="Mặc định",
+            command=lambda: self.encrypt_out_dir_var.set(""),
+            bg="#374151",
+            fg=TEXT,
+            activebackground="#4b5563",
+            activeforeground=TEXT,
+            relief="flat",
+            padx=10,
+            pady=4,
+            cursor="hand2",
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(4, 0))
+
+        tk.Label(
+            out_dir_frame,
+            text="Để trống = mặc định (outputs/encrypt_decrypt). Bị khóa khi ‘Ghi đè file gốc’ được chọn.",
+            bg=WINDOW_BG,
+            fg=MUTED,
+            font=("Segoe UI", 8),
+        ).pack(anchor="w", pady=(2, 0))
+
         drop_panel = tk.Frame(content, bg=PANEL_BG, highlightbackground=BORDER, highlightthickness=1)
-        drop_panel.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 10))
+        drop_panel.grid(row=4, column=0, sticky="ew", padx=20, pady=(0, 10))
 
         drop_title = tk.Label(
             drop_panel,
@@ -1434,7 +1597,7 @@ class WeaponSpriteAdapterApp(BaseWindow):
 
         # Log area
         log_panel = tk.Frame(content, bg=PANEL_BG, highlightbackground=BORDER, highlightthickness=1)
-        log_panel.grid(row=3, column=0, sticky="nsew", padx=20, pady=(0, 18))
+        log_panel.grid(row=5, column=0, sticky="nsew", padx=20, pady=(0, 18))
 
         tk.Label(
             log_panel,
@@ -1473,65 +1636,29 @@ class WeaponSpriteAdapterApp(BaseWindow):
         buttons = tk.Frame(footer, bg=PANEL_BG)
         buttons.pack(side="right", padx=14, pady=12)
 
-        tk.Button(
-            buttons,
-            text="Encrypt File(s)",
-            command=lambda: self._encrypt_pick_files("encrypt"),
-            bg=DANGER,
-            fg="white",
-            activebackground="#b91c1c",
-            activeforeground="white",
-            relief="flat",
-            padx=18,
-            pady=10,
-            cursor="hand2",
-            font=("Segoe UI Semibold", 10),
-        ).pack(side="left", padx=(0, 10))
-
-        tk.Button(
-            buttons,
-            text="Decrypt File(s)",
-            command=lambda: self._encrypt_pick_files("decrypt"),
-            bg=SUCCESS,
-            fg="white",
-            activebackground="#15803d",
-            activeforeground="white",
-            relief="flat",
-            padx=18,
-            pady=10,
-            cursor="hand2",
-            font=("Segoe UI Semibold", 10),
-        ).pack(side="left", padx=(0, 10))
-
-        tk.Button(
-            buttons,
-            text="Encrypt Folder",
-            command=lambda: self._encrypt_pick_folder("encrypt"),
-            bg="#b45309",
-            fg="white",
-            activebackground="#92400e",
-            activeforeground="white",
-            relief="flat",
-            padx=18,
-            pady=10,
-            cursor="hand2",
-            font=("Segoe UI Semibold", 10),
-        ).pack(side="left", padx=(0, 10))
-
-        tk.Button(
-            buttons,
-            text="Decrypt Folder",
-            command=lambda: self._encrypt_pick_folder("decrypt"),
-            bg=ACCENT,
-            fg="white",
-            activebackground=ACCENT_ALT,
-            activeforeground="white",
-            relief="flat",
-            padx=18,
-            pady=10,
-            cursor="hand2",
-            font=("Segoe UI Semibold", 10),
-        ).pack(side="left", padx=(0, 10))
+        self._encrypt_action_btns.clear()
+        for text, cmd, bg, abg in (
+            ("Encrypt File(s)", lambda: self._encrypt_pick_files("encrypt"), DANGER, "#b91c1c"),
+            ("Decrypt File(s)", lambda: self._encrypt_pick_files("decrypt"), SUCCESS, "#15803d"),
+            ("Encrypt Folder",  lambda: self._encrypt_pick_folder("encrypt"), "#b45309", "#92400e"),
+            ("Decrypt Folder",  lambda: self._encrypt_pick_folder("decrypt"), ACCENT, ACCENT_ALT),
+        ):
+            btn = tk.Button(
+                buttons,
+                text=text,
+                command=cmd,
+                bg=bg,
+                fg="white",
+                activebackground=abg,
+                activeforeground="white",
+                relief="flat",
+                padx=18,
+                pady=10,
+                cursor="hand2",
+                font=("Segoe UI Semibold", 10),
+            )
+            btn.pack(side="left", padx=(0, 10))
+            self._encrypt_action_btns.append(btn)
 
         tk.Button(
             buttons,
@@ -1548,6 +1675,9 @@ class WeaponSpriteAdapterApp(BaseWindow):
         ).pack(side="left")
 
     def _encrypt_log_append(self, msg: str) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            self._encrypt_log_queue.put(msg)
+            return
         self.encrypt_log.configure(state="normal")
         self.encrypt_log.insert("end", msg + "\n")
         self.encrypt_log.see("end")
@@ -1580,7 +1710,11 @@ class WeaponSpriteAdapterApp(BaseWindow):
         out_dir: Path | None = None
         src_root: Path | None = None
         if not overwrite:
-            out_dir = OUTPUT_ROOT / "encrypt_decrypt" / "dropped"
+            custom = self.encrypt_out_dir_var.get().strip()
+            if custom:
+                out_dir = Path(custom)
+            else:
+                out_dir = OUTPUT_ROOT / "encrypt_decrypt" / "dropped"
             out_dir.mkdir(exist_ok=True, parents=True)
             # Determine src_root from dropped directories for preserving folder structure
             dropped_dirs = [p for p in dropped_paths if p.is_dir()]
@@ -1614,7 +1748,7 @@ class WeaponSpriteAdapterApp(BaseWindow):
         Returns 'encrypt', 'decrypt', or 'skip'.
         """
         is_normal = self._is_normal_png(data)
-        mode = self.encrypt_mode.get()  # auto / encrypt / decrypt
+        mode = self._enc_mode_snap  # snapshotted before spawning threads
 
         if mode == "encrypt":
             return "encrypt"
@@ -1628,6 +1762,20 @@ class WeaponSpriteAdapterApp(BaseWindow):
         if btn_action == "decrypt":
             return "decrypt" if not is_normal else "skip"
 
+        return "skip"
+
+    def _decide_action_aes(self, data: bytes | bytearray, btn_action: str) -> str:
+        """Decide 'encrypt' or 'decrypt' for AES mode based on mode + AES magic header."""
+        is_aes_encrypted = len(data) >= _AES_HDR_SIZE and data[0:2] == _AES_MAGIC
+        mode = self._enc_mode_snap  # snapshotted before spawning threads
+        if mode == "encrypt":
+            return "encrypt"
+        if mode == "decrypt":
+            return "decrypt"
+        if btn_action == "encrypt":
+            return "encrypt" if not is_aes_encrypted else "skip"
+        if btn_action == "decrypt":
+            return "decrypt" if is_aes_encrypted else "skip"
         return "skip"
 
     @staticmethod
@@ -1687,32 +1835,70 @@ class WeaponSpriteAdapterApp(BaseWindow):
         prefix: str | None = None,
         src_root: Path | None = None,
     ) -> None:
+        if self._encrypt_busy:
+            return
+
+        # Snapshot all Tkinter-bound values — must be read on the main thread
+        algo = self.encrypt_algo.get()
+        self._enc_mode_snap = self.encrypt_mode.get()
+        overwrite = self.encrypt_overwrite.get()
+
+        self._set_encrypt_busy(True)
         self._encrypt_log_clear()
         label = btn_action.upper()
+        total = len(source_files)
+        n_workers = min(32, (os.cpu_count() or 1) * 2)
         if prefix:
             self._encrypt_log_append(prefix)
-        self._encrypt_log_append(f"[{label}] Found {len(source_files)} file(s). Processing...")
+        self._encrypt_log_append(
+            f"[{label}] Found {total} file(s). Processing with {n_workers} workers..."
+        )
 
-        ok = 0
-        skipped = 0
-        for source_file in source_files:
-            if self._process_encrypt_file(source_file, out_dir, btn_action, src_root=src_root):
-                ok += 1
-            else:
-                skipped += 1
+        def _worker() -> None:
+            ok = 0
+            skipped = 0
+            try:
+                with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                    if algo == "aes":
+                        futs = {
+                            pool.submit(
+                                self._process_aes_file, f, out_dir, btn_action, src_root, overwrite
+                            ): f
+                            for f in source_files
+                        }
+                    else:
+                        futs = {
+                            pool.submit(
+                                self._process_encrypt_file, f, out_dir, btn_action, src_root, overwrite
+                            ): f
+                            for f in source_files
+                        }
+                    for fut in as_completed(futs):
+                        try:
+                            if fut.result():
+                                ok += 1
+                            else:
+                                skipped += 1
+                        except Exception as exc:
+                            self._encrypt_log_queue.put(
+                                f"  ERROR (future): {futs[fut].name}: {exc}"
+                            )
+                            skipped += 1
+            finally:
+                if out_dir:
+                    self.last_encrypt_dir = out_dir
+                msg = f"[{label}] Done: {ok} processed, {skipped} skipped, {total} total."
+                self._encrypt_log_queue.put(("__DONE__", msg))
 
-        if out_dir:
-            self.last_encrypt_dir = out_dir
-
-        msg = f"[{label}] Done: {ok} processed, {skipped} skipped, {len(source_files)} total."
-        self._encrypt_log_append(msg)
-        self.encrypt_status_text.set(msg)
-        messagebox.showinfo(APP_TITLE, msg)
+        threading.Thread(target=_worker, daemon=True).start()
+        self._encrypt_poll_log()
 
     def _process_encrypt_file(self, src_path: Path, out_dir: Path | None,
-                              btn_action: str, src_root: Path | None = None) -> bool:
+                              btn_action: str, src_root: Path | None = None,
+                              overwrite: bool | None = None) -> bool:
         """Process a single PNG file. Returns True on success."""
         try:
+            _ow = overwrite if overwrite is not None else self.encrypt_overwrite.get()
             data = bytearray(src_path.read_bytes())
             if len(data) < 51:
                 self._encrypt_log_append(f"  SKIP (too small, <51 bytes): {src_path.name}")
@@ -1756,7 +1942,7 @@ class WeaponSpriteAdapterApp(BaseWindow):
                     f"  WARN [{tag}]: {src_path.name} — result van con PNG header (khong dung voi file da ma hoa)"
                 )
 
-            if self.encrypt_overwrite.get():
+            if _ow:
                 src_path.write_bytes(transformed)
                 if action == "encrypt" and src_path.suffix.lower() == ".png":
                     self._encrypt_log_append(
@@ -1773,11 +1959,74 @@ class WeaponSpriteAdapterApp(BaseWindow):
             self._encrypt_log_append(f"  ERROR: {src_path.name}: {exc}")
             return False
 
+    def _process_aes_file(self, src_path: Path, out_dir: Path | None,
+                          btn_action: str, src_root: Path | None = None,
+                          overwrite: bool | None = None) -> bool:
+        """Process a single file with AES-128-CTR. Returns True on success."""
+        try:
+            _ow = overwrite if overwrite is not None else self.encrypt_overwrite.get()
+            if _AES_LIB is None:
+                self._encrypt_log_append(
+                    "  ERROR: pycryptodome not installed. Run: pip install pycryptodome"
+                )
+                return False
+
+            raw = src_path.read_bytes()
+            action = self._decide_action_aes(raw, btn_action)
+            self._encrypt_log_append(f"  INPUT: {src_path.name}")
+
+            if action == "skip":
+                is_enc = len(raw) >= _AES_HDR_SIZE and raw[0:2] == _AES_MAGIC
+                reason = "already AES-encrypted" if is_enc else "not AES-encrypted"
+                self._encrypt_log_append(f"  SKIP ({reason}): {src_path.name}")
+                return False
+
+            tag = "AES-ENC" if action == "encrypt" else "AES-DEC"
+            try:
+                if action == "encrypt":
+                    result = self._aes_encrypt_bytes(raw)
+                else:
+                    result = self._aes_decrypt_bytes(raw)
+            except (ValueError, RuntimeError) as exc:
+                self._encrypt_log_append(f"  ERR [{tag}] {src_path.name}: {exc}")
+                return False
+
+            if _ow:
+                src_path.write_bytes(result)
+                self._encrypt_log_append(f"  OK [{tag}] (overwrite): {src_path.name}")
+            else:
+                if out_dir is not None:
+                    action_dir = out_dir / ("encrypted" if action == "encrypt" else "decrypted")
+                    if src_root is not None:
+                        try:
+                            rel = src_path.parent.relative_to(src_root)
+                            if rel != Path("."):
+                                action_dir = action_dir / rel
+                        except ValueError:
+                            pass
+                    action_dir.mkdir(parents=True, exist_ok=True)
+                    dest = action_dir / src_path.name
+                else:
+                    dest = src_path.parent / src_path.name
+                dest.write_bytes(result)
+                self._encrypt_log_append(f"  OK [{tag}] → {dest}")
+
+            return True
+        except Exception as exc:
+            self._encrypt_log_append(f"  ERROR: {src_path.name}: {exc}")
+            return False
+
     def _encrypt_pick_files(self, btn_action: str) -> None:
-        title = "Choose PNG file(s) to encrypt" if btn_action == "encrypt" \
-            else "Choose encrypted file(s) (.dnd or obfuscated .png) to decrypt"
-        filetypes = [("PNG files", "*.png"), ("All files", "*.*")]
-        if btn_action == "decrypt":
+        algo = self.encrypt_algo.get()
+        if algo == "aes":
+            title = "Choose file(s) to AES-encrypt" if btn_action == "encrypt" \
+                else "Choose AES-encrypted file(s) to decrypt"
+            filetypes = [("All files", "*.*"), ("PNG files", "*.png")]
+        elif btn_action == "encrypt":
+            title = "Choose PNG file(s) to encrypt"
+            filetypes = [("PNG files", "*.png"), ("All files", "*.*")]
+        else:
+            title = "Choose encrypted file(s) (.dnd or obfuscated .png) to decrypt"
             filetypes = [("Encrypted files", "*.dnd *.png"), ("All files", "*.*")]
         paths = filedialog.askopenfilenames(
             title=title,
@@ -1790,7 +2039,8 @@ class WeaponSpriteAdapterApp(BaseWindow):
         overwrite = self.encrypt_overwrite.get()
         out_dir: Path | None = None
         if not overwrite:
-            out_dir = OUTPUT_ROOT / "encrypt_decrypt"
+            custom = self.encrypt_out_dir_var.get().strip()
+            out_dir = Path(custom) if custom else OUTPUT_ROOT / "encrypt_decrypt"
             out_dir.mkdir(exist_ok=True, parents=True)
         self._run_encrypt_batch([Path(p) for p in paths], out_dir, btn_action)
 
@@ -1802,8 +2052,11 @@ class WeaponSpriteAdapterApp(BaseWindow):
             return
 
         src_dir = Path(folder)
-        patterns = ["*.png"] if btn_action == "encrypt" else ["*.dnd", "*.png"]
-        source_files = sorted({path for pattern in patterns for path in src_dir.rglob(pattern) if path.is_file()})
+        if self.encrypt_algo.get() == "aes":
+            source_files = sorted(p for p in src_dir.rglob("*") if p.is_file())
+        else:
+            patterns = ["*.png"] if btn_action == "encrypt" else ["*.dnd", "*.png"]
+            source_files = sorted({path for pattern in patterns for path in src_dir.rglob(pattern) if path.is_file()})
         if not source_files:
             expected = ".png" if btn_action == "encrypt" else ".dnd or encrypted .png"
             messagebox.showwarning(APP_TITLE, f"No {expected} files found in the selected folder.")
@@ -1813,7 +2066,11 @@ class WeaponSpriteAdapterApp(BaseWindow):
         overwrite = self.encrypt_overwrite.get()
         out_dir: Path | None = None
         if not overwrite:
-            out_dir = OUTPUT_ROOT / "encrypt_decrypt" / src_dir.name
+            custom = self.encrypt_out_dir_var.get().strip()
+            if custom:
+                out_dir = Path(custom)
+            else:
+                out_dir = OUTPUT_ROOT / "encrypt_decrypt" / src_dir.name
             out_dir.mkdir(exist_ok=True, parents=True)
         self._run_encrypt_batch(source_files, out_dir, btn_action, prefix=f"Folder: {src_dir}", src_root=src_dir)
 
@@ -1821,6 +2078,46 @@ class WeaponSpriteAdapterApp(BaseWindow):
         target = self.last_encrypt_dir if self.last_encrypt_dir else OUTPUT_ROOT / "encrypt_decrypt"
         target.mkdir(exist_ok=True, parents=True)
         os.startfile(target)
+
+    def _encrypt_browse_output(self) -> None:
+        folder = filedialog.askdirectory(title="Chọn thư mục output cho Encrypt/Decrypt")
+        if folder:
+            self.encrypt_out_dir_var.set(folder)
+
+    def _encrypt_toggle_out_dir(self) -> None:
+        if self._enc_out_dir_entry is None or self._enc_out_dir_browse_btn is None:
+            return
+        locked = self.encrypt_overwrite.get()
+        state = "disabled" if locked else "readonly"
+        btn_state = "disabled" if locked else "normal"
+        self._enc_out_dir_entry.configure(state=state)
+        self._enc_out_dir_browse_btn.configure(state=btn_state)
+
+    def _set_encrypt_busy(self, busy: bool) -> None:
+        self._encrypt_busy = busy
+        state = "disabled" if busy else "normal"
+        for btn in self._encrypt_action_btns:
+            btn.configure(state=state)
+        if busy:
+            self.encrypt_status_text.set("Processing… please wait.")
+
+    def _encrypt_poll_log(self) -> None:
+        """Drain the log queue and, on completion, re-enable the UI."""
+        try:
+            while True:
+                item = self._encrypt_log_queue.get_nowait()
+                if isinstance(item, tuple) and item[0] == "__DONE__":
+                    msg = item[1]
+                    self._encrypt_log_append(msg)
+                    self.encrypt_status_text.set(msg)
+                    self._set_encrypt_busy(False)
+                    messagebox.showinfo(APP_TITLE, msg)
+                    return
+                else:
+                    self._encrypt_log_append(str(item))
+        except queue.Empty:
+            pass
+        self.after(40, self._encrypt_poll_log)
 
     def _detect_default_icon_root(self) -> str:
         workspace_root = Path(__file__).resolve().parents[2]
