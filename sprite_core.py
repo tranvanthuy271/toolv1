@@ -11,7 +11,6 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 IMAGE_NEAREST = Image.Resampling.NEAREST if hasattr(Image, "Resampling") else Image.NEAREST
 
@@ -123,13 +122,8 @@ def _grow_background_region(candidate_mask: np.ndarray, seed_mask: np.ndarray) -
     return background_mask
 
 
-def remove_background(img: Image.Image, tolerance: int = 18) -> Image.Image:
-    """Remove background using per-edge independent flood-fill.
-
-    Each of the 4 border edges is processed separately with its own background
-    colour estimate.  The four resulting masks are unioned, so a corner that
-    has a slightly different shade from the rest still gets removed.
-    """
+def remove_background(img: Image.Image, tolerance: int = 18, global_remove: bool = False) -> Image.Image:
+    """Remove background using flood-fill from borders with the most common border color."""
     if img.mode not in ("RGBA", "RGB"):
         img = img.convert("RGBA")
 
@@ -140,66 +134,55 @@ def remove_background(img: Image.Image, tolerance: int = 18) -> Image.Image:
     if height == 0 or width == 0:
         return Image.fromarray(arr, mode="RGBA")
 
-    alpha = arr[:, :, 3]
-    existing_alpha = alpha > 10
+    # Create mask for the 4 edges
+    border_mask = np.zeros((height, width), dtype=bool)
+    border_mask[0, :] = True
+    border_mask[height - 1, :] = True
+    border_mask[:, 0] = True
+    border_mask[:, width - 1] = True
+
     rgb_f = arr[:, :, :3].astype(np.float32)
+    alpha = arr[:, :, 3]
 
-    # 4 edges: (pixel rows/cols, border boolean mask)
-    top_border = np.zeros((height, width), dtype=bool)
-    top_border[0, :] = True
-    bot_border = np.zeros((height, width), dtype=bool)
-    bot_border[height - 1, :] = True
-    lft_border = np.zeros((height, width), dtype=bool)
-    lft_border[:, 0] = True
-    rgt_border = np.zeros((height, width), dtype=bool)
-    rgt_border[:, width - 1] = True
+    borders = rgb_f[border_mask]
+    border_alphas = alpha[border_mask]
+    
+    # Only consider opaque border pixels
+    valid_borders = borders[border_alphas > 10]
+    if len(valid_borders) == 0:
+        return rgba.copy()
+        
+    # Find the most common color on the border
+    colors, counts = np.unique(valid_borders, axis=0, return_counts=True)
+    bg_color = colors[np.argmax(counts)]
+    
+    # Adaptive tolerance based on border color variance
+    local_diff = np.sqrt(((valid_borders - bg_color[None, :]) ** 2).sum(axis=1))
+    local_tol = max(float(tolerance), float(np.percentile(local_diff, 85)) + 8.0)
+    local_tol = min(local_tol, float(tolerance) * 4.0)
 
-    edge_defs = [
-        (arr[0, :, :3],            alpha[0, :],            top_border),
-        (arr[height - 1, :, :3],   alpha[height - 1, :],   bot_border),
-        (arr[:, 0, :3],            alpha[:, 0],             lft_border),
-        (arr[:, width - 1, :3],    alpha[:, width - 1],     rgt_border),
-    ]
-
-    background_mask = np.zeros((height, width), dtype=bool)
-    any_processed = False
-
-    consistency_tol = max(float(tolerance) + 8.0, 24.0)
-
-    for edge_rgb, edge_alpha, edge_border in edge_defs:
-        # Collect opaque pixels on this edge
-        opaque_mask = edge_alpha > 10
-        opaque_pixels = edge_rgb[opaque_mask].astype(np.float32)
-        if len(opaque_pixels) < 5:
-            continue  # edge is nearly all transparent — nothing to seed from
-
-        # Estimate background colour for this edge
-        local_bg = np.median(opaque_pixels, axis=0)
-        local_diff = np.sqrt(((opaque_pixels - local_bg[None, :]) ** 2).sum(axis=1))
-
-        # Skip edge if its pixels don't form a consistent background colour
-        if float(np.mean(local_diff <= consistency_tol)) < 0.50:
-            continue
-
-        # Per-edge adaptive tolerance
-        local_tol = max(float(tolerance), float(np.percentile(local_diff, 85)) + 8.0)
-        local_tol = min(local_tol, float(tolerance) * 3.5)
-
-        color_diff = np.sqrt(((rgb_f - local_bg[None, None, :]) ** 2).sum(axis=2))
-        candidate = (color_diff <= local_tol) & existing_alpha
-        seed = edge_border & candidate
+    color_diff = np.sqrt(((rgb_f - bg_color[None, None, :]) ** 2).sum(axis=2))
+    
+    if global_remove:
+        # Globally remove the identified background color
+        candidate = (color_diff <= local_tol) & (alpha > 10)
+        result = arr.copy()
+        result[candidate, :3] = 0
+        result[candidate, 3] = 0
+        return Image.fromarray(result, mode="RGBA")
+    else:
+        # Use flood fill to only remove connected outer background
+        candidate = (color_diff <= local_tol) & (alpha > 10)
+        seed = border_mask & candidate
 
         if seed.any():
-            background_mask |= _grow_background_region(candidate, seed)
-            any_processed = True
+            background_mask = _grow_background_region(candidate, seed)
+            result = arr.copy()
+            result[background_mask, :3] = 0
+            result[background_mask, 3] = 0
+            return Image.fromarray(result, mode="RGBA")
 
-    if not any_processed:
-        return rgba.copy()
-
-    result = arr.copy()
-    result[background_mask, :3] = 0
-    result[background_mask, 3] = 0
-    return Image.fromarray(result, mode="RGBA")
+    return rgba.copy()
 
 
 def get_weapon_bbox(img: Image.Image) -> tuple[int, int, int, int]:
@@ -229,11 +212,11 @@ def get_weapon_center_offset(img: Image.Image) -> tuple[float, float]:
     return (float((x0 + x1) / (2 * img.width)), float((y0 + y1) / (2 * img.height)))
 
 
-def analyze_image(img: Image.Image, auto_remove_bg: bool = True) -> dict[str, Any]:
+def analyze_image(img: Image.Image, auto_remove_bg: bool = True, global_remove: bool = False) -> dict[str, Any]:
     working = img.convert("RGBA")
     if auto_remove_bg:
         try:
-            working = remove_background(working)
+            working = remove_background(working, global_remove=global_remove)
         except Exception:
             pass
 
@@ -250,18 +233,19 @@ def analyze_image(img: Image.Image, auto_remove_bg: bool = True) -> dict[str, An
     }
 
 
-def analyze_image_path(path: str | os.PathLike[str], auto_remove_bg: bool = True) -> dict[str, Any]:
+def analyze_image_path(path: str | os.PathLike[str], auto_remove_bg: bool = True, global_remove: bool = False) -> dict[str, Any]:
     image = load_rgba_image(path)
-    return analyze_image(image, auto_remove_bg=auto_remove_bg)
+    return analyze_image(image, auto_remove_bg=auto_remove_bg, global_remove=global_remove)
 
 
 def save_background_removed_image(
     image_path: str | os.PathLike[str],
     output_root: Path | None = None,
+    global_remove: bool = False,
 ) -> dict[str, Any]:
     batch_dir = create_output_batch_dir("rm_bg", output_root)
     source_image = load_rgba_image(image_path)
-    output_image = remove_background(source_image)
+    output_image = remove_background(source_image, global_remove=global_remove)
 
     source_name = Path(image_path).stem
     output_path = batch_dir / f"{source_name}_rm_bg.png"
@@ -280,17 +264,18 @@ def adapt_weapon(
     reference_img: Image.Image,
     layout_img: Image.Image,
     auto_remove_bg: bool = True,
+    global_remove: bool = False,
 ) -> Image.Image:
     ref_working = reference_img.convert("RGBA")
     layout_working = layout_img.convert("RGBA")
 
     if auto_remove_bg:
         try:
-            ref_working = remove_background(ref_working)
+            ref_working = remove_background(ref_working, global_remove=global_remove)
         except Exception:
             pass
         try:
-            layout_working = remove_background(layout_working)
+            layout_working = remove_background(layout_working, global_remove=global_remove)
         except Exception:
             pass
 
@@ -325,6 +310,7 @@ def generate_batch(
     reference_path: str | os.PathLike[str],
     layout_paths: list[str | os.PathLike[str] | None],
     auto_remove_bg: bool = True,
+    global_remove: bool = False,
     output_root: Path | None = None,
     output_mode: str = "separate",
 ) -> tuple[Path, list[dict[str, Any] | None]]:
@@ -344,7 +330,7 @@ def generate_batch(
             continue
 
         layout_img = load_rgba_image(layout_path)
-        output_img = adapt_weapon(reference_img, layout_img, auto_remove_bg=auto_remove_bg)
+        output_img = adapt_weapon(reference_img, layout_img, auto_remove_bg=auto_remove_bg, global_remove=global_remove)
         layout_stem = Path(layout_path).stem or f"slot_{index}"
         filename = f"{layout_stem}.png"
         suffix = 2

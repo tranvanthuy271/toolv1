@@ -279,13 +279,13 @@ class ImageSlot(tk.Frame):
         self.refresh_preview()
         self.on_change()
 
-    def refresh_analysis(self, auto_remove_bg: bool) -> None:
+    def refresh_analysis(self, auto_remove_bg: bool, global_remove_bg: bool = False) -> None:
         if not self.path:
             self.analysis = None
             self.info_label.configure(text="")
             return
 
-        self.analysis = analyze_image_path(self.path, auto_remove_bg=auto_remove_bg)
+        self.analysis = analyze_image_path(self.path, auto_remove_bg=auto_remove_bg, global_remove=global_remove_bg)
         if self.info_mode == "dimensions":
             self.info_label.configure(
                 text=f"{self.analysis['width']} x {self.analysis['height']} px"
@@ -448,9 +448,19 @@ class WeaponSpriteAdapterApp(BaseWindow):
         self.grid_columnconfigure(0, weight=1)
 
         self.auto_remove_bg = tk.BooleanVar(value=True)
+        self.global_remove_bg = tk.BooleanVar(value=False)
         self.adapter_output_mode = tk.StringVar(value="separate")
         self.status_text = tk.StringVar(value="Choose a source image and at least one template image.")
         self.bg_status_text = tk.StringVar(value="Choose an image to remove its background.")
+        self.bg_batch_paths: list[str] = []
+        self.bg_resize_enabled = tk.BooleanVar(value=False)
+        self.bg_resize_width = tk.IntVar(value=1990)
+        self.bg_resize_height = tk.IntVar(value=1020)
+        self.bg_numbering_enabled = tk.BooleanVar(value=False)
+        self.bg_start_number = tk.IntVar(value=1)
+        self.bg_out_dir_var = tk.StringVar(value="")
+        self.bg_log_queue: queue.Queue = queue.Queue()
+        self.bg_busy = False
         self.client_scale_output_mode = tk.StringVar(value="separate")
         self.client_scale_status_text = tk.StringVar(
             value="Drop or choose x4 PNG/.dnd files to export x4/x3/x2/x1 PNGs. Default: folder rieng."
@@ -680,6 +690,19 @@ class WeaponSpriteAdapterApp(BaseWindow):
             font=("Segoe UI", 10),
         ).pack(side="left")
 
+        tk.Checkbutton(
+            options,
+            text="Remove enclosed background",
+            variable=self.global_remove_bg,
+            command=self.refresh_all_analyses,
+            bg=PANEL_BG,
+            fg=TEXT,
+            activebackground=PANEL_BG,
+            activeforeground=TEXT,
+            selectcolor=WINDOW_BG,
+            font=("Segoe UI", 10),
+        ).pack(side="left", padx=(8, 0))
+
         tk.Label(
             options,
             text="Save:",
@@ -763,7 +786,7 @@ class WeaponSpriteAdapterApp(BaseWindow):
 
         tk.Label(
             header,
-            text="Remove Background",
+            text="Remove Background (Batch)",
             bg=WINDOW_BG,
             fg="white",
             font=("Segoe UI Semibold", 22),
@@ -771,7 +794,7 @@ class WeaponSpriteAdapterApp(BaseWindow):
 
         tk.Label(
             header,
-            text="Tach rieng che do xoa nen: chon 1 anh, xuat PNG trong suot vao outputs.",
+            text="Xoa nen cho nhieu anh hoac ca thu muc, kem tinh nang resize va danh so thu tu.",
             bg=WINDOW_BG,
             fg=MUTED,
             font=("Segoe UI", 10),
@@ -787,42 +810,83 @@ class WeaponSpriteAdapterApp(BaseWindow):
         source_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         tk.Label(
             source_panel,
-            text="Source Image",
+            text="Input Settings",
             bg=PANEL_BG,
             fg="#c4b5fd",
             font=("Segoe UI Semibold", 12),
         ).pack(anchor="w", padx=12, pady=(12, 8))
 
-        self.bg_source_slot = ImageSlot(
-            source_panel,
-            "Input",
-            (420, 320),
-            self.on_bg_source_changed,
-            info_mode="dimensions",
+        # Input selection
+        input_frame = tk.Frame(source_panel, bg=PANEL_BG)
+        input_frame.pack(fill="x", padx=12, pady=(0, 10))
+        tk.Button(
+            input_frame, text="Choose File(s)", command=self._bg_browse_files,
+            bg=ACCENT, fg="white", activebackground=ACCENT_ALT, activeforeground="white",
+            relief="flat", padx=10, pady=4, cursor="hand2"
+        ).pack(side="left", padx=(0, 8))
+        tk.Button(
+            input_frame, text="Choose Folder", command=self._bg_browse_folder,
+            bg=ACCENT, fg="white", activebackground=ACCENT_ALT, activeforeground="white",
+            relief="flat", padx=10, pady=4, cursor="hand2"
+        ).pack(side="left")
+        
+        self.bg_input_label = tk.Label(
+            source_panel, text="No input selected", bg=PANEL_BG, fg=MUTED, font=("Segoe UI", 9)
         )
-        self.bg_source_slot.pack(fill="x", padx=12, pady=(0, 10))
+        self.bg_input_label.pack(anchor="w", padx=12, pady=(0, 12))
 
-        tk.Label(
-            source_panel,
-            text="Mep va 4 goc cang gan mau nen thi ket qua cang on dinh.",
-            bg=PANEL_BG,
-            fg=MUTED,
-            font=("Segoe UI", 9),
-            justify="left",
-        ).pack(anchor="w", padx=12, pady=(0, 12))
+        # Resize Config
+        resize_frame = tk.Frame(source_panel, bg=PANEL_BG)
+        resize_frame.pack(fill="x", padx=12, pady=(0, 10))
+        tk.Checkbutton(
+            resize_frame, text="Resize Image", variable=self.bg_resize_enabled,
+            bg=PANEL_BG, fg=TEXT, activebackground=PANEL_BG, activeforeground=TEXT, selectcolor=WINDOW_BG
+        ).pack(side="left")
+        tk.Label(resize_frame, text="W:", bg=PANEL_BG, fg=TEXT).pack(side="left", padx=(8, 2))
+        tk.Entry(resize_frame, textvariable=self.bg_resize_width, width=6, bg=CARD_BG, fg=TEXT, relief="flat", insertbackground=TEXT).pack(side="left")
+        tk.Label(resize_frame, text="H:", bg=PANEL_BG, fg=TEXT).pack(side="left", padx=(8, 2))
+        tk.Entry(resize_frame, textvariable=self.bg_resize_height, width=6, bg=CARD_BG, fg=TEXT, relief="flat", insertbackground=TEXT).pack(side="left")
+
+        # Numbering Config
+        num_frame = tk.Frame(source_panel, bg=PANEL_BG)
+        num_frame.pack(fill="x", padx=12, pady=(0, 10))
+        tk.Checkbutton(
+            num_frame, text="Sequential Numbering (e.g. 1.png, 2.png)", variable=self.bg_numbering_enabled,
+            bg=PANEL_BG, fg=TEXT, activebackground=PANEL_BG, activeforeground=TEXT, selectcolor=WINDOW_BG
+        ).pack(side="left")
+        tk.Label(num_frame, text="Start:", bg=PANEL_BG, fg=TEXT).pack(side="left", padx=(8, 2))
+        tk.Entry(num_frame, textvariable=self.bg_start_number, width=6, bg=CARD_BG, fg=TEXT, relief="flat", insertbackground=TEXT).pack(side="left")
+
+        # Output Folder Config
+        out_frame = tk.Frame(source_panel, bg=PANEL_BG)
+        out_frame.pack(fill="x", padx=12, pady=(0, 10))
+        tk.Label(out_frame, text="Output Folder:", bg=PANEL_BG, fg=TEXT).pack(side="left", padx=(0, 8))
+        tk.Entry(out_frame, textvariable=self.bg_out_dir_var, bg=CARD_BG, fg=TEXT, state="readonly", readonlybackground=CARD_BG, relief="flat").pack(side="left", fill="x", expand=True)
+        tk.Button(out_frame, text="Browse", command=self._bg_browse_output, bg=ACCENT, fg="white", activebackground=ACCENT_ALT, activeforeground="white", relief="flat", padx=6, cursor="hand2").pack(side="left", padx=(4, 0))
+        tk.Button(out_frame, text="Default", command=lambda: self.bg_out_dir_var.set(""), bg="#374151", fg=TEXT, activebackground="#4b5563", activeforeground=TEXT, relief="flat", padx=6, cursor="hand2").pack(side="left", padx=(4, 0))
 
         output_panel = tk.Frame(body, bg=PANEL_BG, highlightbackground=BORDER, highlightthickness=1)
         output_panel.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         tk.Label(
             output_panel,
-            text="Transparent Output",
+            text="Execution Log",
             bg=PANEL_BG,
             fg="#c4b5fd",
             font=("Segoe UI Semibold", 12),
         ).pack(anchor="w", padx=12, pady=(12, 8))
 
-        self.bg_result_card = ResultCard(output_panel, "Processed PNG", (420, 320))
-        self.bg_result_card.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self.bg_log = tk.Text(
+            output_panel,
+            bg=CARD_BG,
+            fg=TEXT,
+            font=("Consolas", 10),
+            wrap="word",
+            state="disabled",
+            highlightthickness=1,
+            highlightbackground="#1f2a4c",
+            relief="flat",
+        )
+        self.bg_log.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
     def _build_remove_bg_footer(self) -> None:
         footer = tk.Frame(self.remove_bg_frame, bg=PANEL_BG, highlightbackground=BORDER, highlightthickness=1)
@@ -838,6 +902,18 @@ class WeaponSpriteAdapterApp(BaseWindow):
 
         buttons = tk.Frame(footer, bg=PANEL_BG)
         buttons.pack(side="right", padx=14, pady=12)
+
+        tk.Checkbutton(
+            buttons,
+            text="Remove enclosed background",
+            variable=self.global_remove_bg,
+            bg=PANEL_BG,
+            fg=TEXT,
+            activebackground=PANEL_BG,
+            activeforeground=TEXT,
+            selectcolor=WINDOW_BG,
+            font=("Segoe UI", 10),
+        ).pack(side="left", padx=(0, 16))
 
         self.remove_bg_button = tk.Button(
             buttons,
@@ -1075,10 +1151,11 @@ class WeaponSpriteAdapterApp(BaseWindow):
 
     def refresh_all_analyses(self) -> None:
         auto_remove_bg = self.auto_remove_bg.get()
+        global_remove_bg = self.global_remove_bg.get()
         try:
-            self.reference_slot.refresh_analysis(auto_remove_bg)
+            self.reference_slot.refresh_analysis(auto_remove_bg, global_remove_bg)
             for slot in self.layout_slots:
-                slot.refresh_analysis(auto_remove_bg)
+                slot.refresh_analysis(auto_remove_bg, global_remove_bg)
             mode = "on" if auto_remove_bg else "off"
             self.status_text.set(f"Ready. Background removal is {mode}.")
         except Exception as exc:
@@ -1090,7 +1167,7 @@ class WeaponSpriteAdapterApp(BaseWindow):
         self.generate_button.configure(state="normal" if has_reference and has_layout else "disabled")
 
     def update_remove_bg_button_state(self) -> None:
-        self.remove_bg_button.configure(state="normal" if self.bg_source_slot.path else "disabled")
+        self.remove_bg_button.configure(state="normal" if self.bg_batch_paths and not self.bg_busy else "disabled")
 
     def generate_images(self) -> None:
         if not self.reference_slot.path:
@@ -1111,6 +1188,7 @@ class WeaponSpriteAdapterApp(BaseWindow):
                 self.reference_slot.path,
                 layout_paths,
                 auto_remove_bg=self.auto_remove_bg.get(),
+                global_remove=self.global_remove_bg.get(),
                 output_mode=self.adapter_output_mode.get(),
             )
             self.last_batch_dir = batch_dir
@@ -1127,26 +1205,135 @@ class WeaponSpriteAdapterApp(BaseWindow):
         finally:
             self.update_generate_button_state()
 
+    def _bg_browse_files(self) -> None:
+        paths = filedialog.askopenfilenames(title="Choose Images", filetypes=IMAGE_TYPES)
+        if paths:
+            self.bg_batch_paths = list(paths)
+            self.bg_input_label.config(text=f"Selected {len(self.bg_batch_paths)} file(s)")
+            self.update_remove_bg_button_state()
+
+    def _bg_browse_folder(self) -> None:
+        folder = filedialog.askdirectory(title="Choose Folder")
+        if folder:
+            paths = []
+            for entry in os.scandir(folder):
+                if entry.is_file() and entry.name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp')):
+                    paths.append(entry.path)
+            self.bg_batch_paths = paths
+            self.bg_input_label.config(text=f"Selected folder: {Path(folder).name} ({len(self.bg_batch_paths)} images)")
+            self.update_remove_bg_button_state()
+
+    def _bg_browse_output(self) -> None:
+        folder = filedialog.askdirectory(title="Choose Output Folder")
+        if folder:
+            self.bg_out_dir_var.set(folder)
+
+    def _bg_log_append(self, msg: str) -> None:
+        self.bg_log.configure(state="normal")
+        self.bg_log.insert("end", msg + "\n")
+        self.bg_log.see("end")
+        self.bg_log.configure(state="disabled")
+
+    def _bg_log_clear(self) -> None:
+        self.bg_log.configure(state="normal")
+        self.bg_log.delete("1.0", "end")
+        self.bg_log.configure(state="disabled")
+
+    def _process_single_bg_task(self, path: str, output_dir: Path, resize: bool, w: int, h: int, seq_num: int | None) -> str:
+        try:
+            from sprite_core import load_rgba_image, remove_background
+            img = load_rgba_image(path)
+            img = remove_background(img, global_remove=self.global_remove_bg.get())
+            
+            if resize:
+                from PIL import Image
+                img = img.resize((w, h), Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.ANTIALIAS)
+                
+            orig_name = Path(path).stem
+            if seq_num is not None:
+                new_name = f"{seq_num}.png"
+            else:
+                new_name = f"{orig_name}_rm_bg.png"
+                
+            out_path = output_dir / new_name
+            # Ensure unique name if not sequentially numbering (though numbering should guarantee uniqueness)
+            if seq_num is None:
+                suffix = 2
+                while out_path.exists():
+                    out_path = output_dir / f"{orig_name}_rm_bg_{suffix}.png"
+                    suffix += 1
+            
+            img.save(out_path, "PNG")
+            return f"Success: {Path(path).name} -> {out_path.name}"
+        except Exception as e:
+            return f"Error ({Path(path).name}): {e}"
+
     def remove_background_only(self) -> None:
-        if not self.bg_source_slot.path:
-            messagebox.showwarning(APP_TITLE, "Please choose an image first.")
+        if not self.bg_batch_paths:
+            messagebox.showwarning(APP_TITLE, "Please choose file(s) or a folder first.")
             return
 
-        self.remove_bg_button.configure(state="disabled")
-        self.bg_status_text.set("Removing background...")
-        self.update_idletasks()
+        self.bg_busy = True
+        self.update_remove_bg_button_state()
+        self._bg_log_clear()
+        
+        custom_out = self.bg_out_dir_var.get()
+        if custom_out:
+            output_dir = Path(custom_out)
+            output_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            output_dir = create_output_batch_dir("rm_bg", OUTPUT_ROOT)
+            
+        self.last_bg_batch_dir = output_dir
+        
+        resize = self.bg_resize_enabled.get()
+        rw = self.bg_resize_width.get()
+        rh = self.bg_resize_height.get()
+        
+        numbering = self.bg_numbering_enabled.get()
+        start_num = self.bg_start_number.get()
 
+        self._bg_log_append(f"Starting batch process ({len(self.bg_batch_paths)} images)...")
+        self._bg_log_append(f"Output directory: {output_dir}")
+        self.bg_status_text.set(f"Processing {len(self.bg_batch_paths)} image(s)...")
+        
+        def _worker() -> None:
+            processed = 0
+            with ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 1) + 4)) as executor:
+                futures = {}
+                current_num = start_num
+                for path in self.bg_batch_paths:
+                    seq_num = current_num if numbering else None
+                    if numbering:
+                        current_num += 1
+                    futures[executor.submit(self._process_single_bg_task, path, output_dir, resize, rw, rh, seq_num)] = path
+                
+                for future in as_completed(futures):
+                    res = future.result()
+                    self.bg_log_queue.put(res)
+                    processed += 1
+            self.bg_log_queue.put(f"__DONE__:{processed}")
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self._bg_poll_queue()
+
+    def _bg_poll_queue(self) -> None:
         try:
-            result = save_background_removed_image(self.bg_source_slot.path)
-            self.last_bg_batch_dir = result["batch_dir"]
-            self.bg_result_card.set_result(result)
-            self.bg_status_text.set(f"Saved transparent PNG to {result['output_path']}")
-            messagebox.showinfo(APP_TITLE, f"Background removed.\n\nSaved to:\n{result['output_path']}")
-        except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Background removal failed:\n{exc}")
-            self.bg_status_text.set(f"Background removal failed: {exc}")
-        finally:
-            self.update_remove_bg_button_state()
+            while True:
+                msg = self.bg_log_queue.get_nowait()
+                if msg.startswith("__DONE__:"):
+                    total = msg.split(":")[1]
+                    self._bg_log_append(f"\nFinished processing {total} images.")
+                    self.bg_status_text.set(f"Done. Processed {total} images.")
+                    self.bg_busy = False
+                    self.update_remove_bg_button_state()
+                    messagebox.showinfo(APP_TITLE, f"Batch process complete.\n\nSaved to:\n{self.last_bg_batch_dir}")
+                    return
+                else:
+                    self._bg_log_append(msg)
+        except queue.Empty:
+            pass
+        self.after(100, self._bg_poll_queue)
 
     def open_output_directory(self) -> None:
         target = self.last_batch_dir if self.last_batch_dir else OUTPUT_ROOT
